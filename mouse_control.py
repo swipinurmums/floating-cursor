@@ -35,7 +35,7 @@ y_range = (
     (screen_aspect * CAMERA_HEIGHT)
 )
 
-VERTICAL_OFFSET = 0.06
+VERTICAL_OFFSET = 0.16
 
 Y_MIN = 0.5 - y_range / 2 + VERTICAL_OFFSET
 Y_MAX = 0.5 + y_range / 2 + VERTICAL_OFFSET
