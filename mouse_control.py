@@ -39,18 +39,23 @@ Y_MAX = 0.5 + y_range / 2 + VERTICAL_OFFSET
 
 
 # ----------------------------
-# PINCH CONFIGURATION
+# PINCH AND DRAG CONFIGURATION
 # ----------------------------
 
 PINCH_START_THRESHOLD = 0.25
 PINCH_RELEASE_THRESHOLD = 0.35
 
-# How long a pinch must be detected before clicking
-PINCH_CONFIRMATION_TIME = 0.08
+# How long a pinch must be held before dragging starts
+DRAG_HOLD_TIME = 0.35
 
-pinch_candidate_start = None
-pinch_active = False
+pinch_tracking = False
+drag_active = False
+
+pinch_start_time = None
 pinch_cursor_position = None
+
+pinch_start_filtered_x = None
+pinch_start_filtered_y = None
 
 
 # ----------------------------
@@ -306,19 +311,29 @@ try:
                 current_time = time.monotonic()
 
                 # ----------------------------
-                # PINCH STATE MACHINE
+                # PINCH AND DRAG STATE MACHINE
                 # ----------------------------
 
-                if pinch_active:
+                if not pinch_tracking:
 
-                    # Keep cursor locked until fingers separate
-                    if pinch_ratio > PINCH_RELEASE_THRESHOLD:
+                    if pinch_ratio < PINCH_START_THRESHOLD:
 
-                        pinch_active = False
-                        pinch_candidate_start = None
-                        pinch_cursor_position = None
+                        # Start pinch and capture cursor position
+                        pinch_tracking = True
+                        pinch_start_time = current_time
 
-                        # Resume cursor movement
+                        pinch_cursor_position = pyautogui.position()
+
+                        # Remember starting fingertip coordinates
+                        pinch_start_filtered_x = filtered_x
+                        pinch_start_filtered_y = filtered_y
+
+                        gesture_text = "PINCHING..."
+                        gesture_colour = (0, 165, 255)
+
+                    else:
+
+                        # Normal cursor movement
                         pyautogui.moveTo(
                             int(target_x),
                             int(target_y)
@@ -327,78 +342,110 @@ try:
                         gesture_text = "CURSOR ACTIVE"
                         gesture_colour = (0, 255, 0)
 
-                    else:
-
-                        gesture_text = "PINCH LOCKED"
-                        gesture_colour = (0, 255, 255)
-
                 else:
 
-                    if pinch_candidate_start is None:
+                    # Fingers are still pinched
+                    if pinch_ratio <= PINCH_RELEASE_THRESHOLD:
 
-                        if pinch_ratio < PINCH_START_THRESHOLD:
+                        elapsed = (
+                            current_time - pinch_start_time
+                        )
 
-                            # Capture current cursor position
-                            pinch_cursor_position = pyautogui.position()
+                        if not drag_active:
 
-                            # Start confirmation timer
-                            pinch_candidate_start = current_time
+                            if elapsed >= DRAG_HOLD_TIME:
 
-                            gesture_text = "PINCHING..."
-                            gesture_colour = (0, 165, 255)
+                                # Begin dragging at captured position
+                                pyautogui.moveTo(
+                                    pinch_cursor_position.x,
+                                    pinch_cursor_position.y
+                                )
+
+                                pyautogui.mouseDown()
+
+                                drag_active = True
+
+                        if drag_active:
+
+                            # Calculate movement relative to
+                            # where the pinch originally started
+                            delta_x = (
+                                (filtered_x - pinch_start_filtered_x)
+                                / (X_MAX - X_MIN)
+                            ) * (screen_width - 1)
+
+                            delta_y = (
+                                (filtered_y - pinch_start_filtered_y)
+                                / (Y_MAX - Y_MIN)
+                            ) * (screen_height - 1)
+
+                            drag_x = (
+                                pinch_cursor_position.x + delta_x
+                            )
+
+                            drag_y = (
+                                pinch_cursor_position.y + delta_y
+                            )
+
+                            # Keep drag inside screen
+                            drag_x = max(
+                                0, min(drag_x, screen_width - 1)
+                            )
+
+                            drag_y = max(
+                                0, min(drag_y, screen_height - 1)
+                            )
+
+                            pyautogui.moveTo(
+                                int(drag_x),
+                                int(drag_y)
+                            )
+
+                            gesture_text = "DRAGGING"
+                            gesture_colour = (255, 0, 255)
 
                         else:
 
-                            # Normal cursor movement
-                            pyautogui.moveTo(
-                                int(target_x),
-                                int(target_y)
-                            )
-
-                            gesture_text = "CURSOR ACTIVE"
-                            gesture_colour = (0, 255, 0)
+                            gesture_text = "HOLD TO DRAG"
+                            gesture_colour = (0, 165, 255)
 
                     else:
 
-                        # Cancel if fingers separate again
-                        if pinch_ratio > PINCH_RELEASE_THRESHOLD:
+                        # Fingers have separated
+                        if drag_active:
 
-                            pinch_candidate_start = None
-                            pinch_cursor_position = None
+                            # Release mouse button to drop object
+                            pyautogui.mouseUp()
 
-                            pyautogui.moveTo(
-                                int(target_x),
-                                int(target_y)
-                            )
-
-                            gesture_text = "CURSOR ACTIVE"
+                            gesture_text = "DROPPED"
                             gesture_colour = (0, 255, 0)
 
                         else:
 
-                            # Wait for pinch confirmation
-                            elapsed = (
-                                current_time - pinch_candidate_start
+                            # Short pinch = normal left-click
+                            pyautogui.click(
+                                x=pinch_cursor_position.x,
+                                y=pinch_cursor_position.y
                             )
 
-                            if elapsed >= PINCH_CONFIRMATION_TIME:
+                            gesture_text = "CLICKED"
+                            gesture_colour = (0, 255, 0)
 
-                                # Click at the captured position
-                                pyautogui.click(
-                                    x=pinch_cursor_position.x,
-                                    y=pinch_cursor_position.y
-                                )
+                        # Reset gesture state
+                        pinch_tracking = False
+                        drag_active = False
 
-                                pinch_active = True
-                                pinch_candidate_start = None
+                        pinch_start_time = None
+                        pinch_cursor_position = None
 
-                                gesture_text = "PINCH LOCKED"
-                                gesture_colour = (0, 255, 255)
+                        pinch_start_filtered_x = None
+                        pinch_start_filtered_y = None
 
-                            else:
-
-                                gesture_text = "PINCHING..."
-                                gesture_colour = (0, 165, 255)
+                        # Resume normal cursor movement
+                        pyautogui.moveTo(
+                            int(target_x),
+                            int(target_y)
+                        )
 
                 # ----------------------------
                 # VISUAL FEEDBACK
@@ -432,12 +479,22 @@ try:
 
             else:
 
+                # If tracking is lost during a drag,
+                # release the mouse button immediately
+                if drag_active:
+                    pyautogui.mouseUp()
+
                 filter_x.reset()
                 filter_y.reset()
 
-                pinch_active = False
-                pinch_candidate_start = None
+                pinch_tracking = False
+                drag_active = False
+
+                pinch_start_time = None
                 pinch_cursor_position = None
+
+                pinch_start_filtered_x = None
+                pinch_start_filtered_y = None
 
                 cv2.putText(
                     frame,
@@ -453,5 +510,9 @@ try:
                 break
 
 finally:
+
+    # Safety: never leave the mouse button held down
+    pyautogui.mouseUp()
+
     camera.release()
     cv2.destroyAllWindows()
