@@ -18,15 +18,15 @@ screen_width, screen_height = pyautogui.size()
 SMOOTHING_MIN_CUTOFF = 1.0
 SMOOTHING_BETA = 0.025
 
-# Horizontal movement region: central 50% of camera
+# Horizontal movement region
 X_MIN = 0.25
 X_MAX = 0.75
 
-# Calculate vertical region to match the monitor's aspect ratio.
-# This makes horizontal and vertical movement feel more consistent.
+# Camera dimensions
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
+# Match tracking area to monitor aspect ratio
 screen_aspect = screen_width / screen_height
 x_range = X_MAX - X_MIN
 
@@ -35,10 +35,21 @@ y_range = (
     (screen_aspect * CAMERA_HEIGHT)
 )
 
+# Vertical position adjustment
 VERTICAL_OFFSET = 0.16
 
 Y_MIN = 0.5 - y_range / 2 + VERTICAL_OFFSET
 Y_MAX = 0.5 + y_range / 2 + VERTICAL_OFFSET
+
+
+# ----------------------------
+# PINCH CONFIGURATION
+# ----------------------------
+
+PINCH_START_THRESHOLD = 0.25
+PINCH_RELEASE_THRESHOLD = 0.35
+
+pinch_active = False
 
 
 # ----------------------------
@@ -73,12 +84,10 @@ class OneEuroFilter:
 
         dt = max(timestamp - self.previous_time, 0.001)
 
-        # Estimate movement speed
         derivative = (
             value - self.previous_value
         ) / dt
 
-        # Smooth the estimated speed
         derivative_alpha = self.smoothing_factor(
             dt, self.derivative_cutoff
         )
@@ -88,7 +97,6 @@ class OneEuroFilter:
             + (1 - derivative_alpha) * self.previous_derivative
         )
 
-        # Adapt smoothing based on movement speed
         cutoff = (
             self.min_cutoff
             + self.beta * abs(filtered_derivative)
@@ -277,6 +285,71 @@ try:
                     int(target_y)
                 )
 
+                # ----------------------------
+                # PINCH-TO-CLICK
+                # ----------------------------
+
+                thumb_tip = hand[4]
+                index_finger_tip = hand[8]
+
+                pinch_distance = math.hypot(
+                    thumb_tip.x - index_finger_tip.x,
+                    thumb_tip.y - index_finger_tip.y
+                )
+
+                # Normalise against palm size
+                palm_size = math.hypot(
+                    hand[0].x - hand[9].x,
+                    hand[0].y - hand[9].y
+                )
+
+                pinch_ratio = (
+                    pinch_distance / max(palm_size, 0.001)
+                )
+
+                # Trigger one click per pinch
+                if (
+                    not pinch_active
+                    and pinch_ratio < PINCH_START_THRESHOLD
+                ):
+
+                    pyautogui.click()
+                    pinch_active = True
+
+                elif (
+                    pinch_active
+                    and pinch_ratio > PINCH_RELEASE_THRESHOLD
+                ):
+
+                    pinch_active = False
+
+                # Gesture feedback
+                if pinch_active:
+                    gesture_text = "PINCH DETECTED"
+                    gesture_colour = (0, 255, 255)
+                else:
+                    gesture_text = "CURSOR ACTIVE"
+                    gesture_colour = (0, 255, 0)
+
+                cv2.putText(
+                    frame,
+                    gesture_text,
+                    (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    gesture_colour,
+                    2
+                )
+
+                # Draw line between thumb and index
+                cv2.line(
+                    frame,
+                    points[4],
+                    points[8],
+                    gesture_colour,
+                    3
+                )
+
                 cv2.putText(
                     frame,
                     f"Index: {index_tip}",
@@ -285,18 +358,12 @@ try:
                     0.6, (255, 255, 255), 2
                 )
 
-                cv2.putText(
-                    frame,
-                    "CURSOR ACTIVE",
-                    (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 0), 2
-                )
-
             else:
 
                 filter_x.reset()
                 filter_y.reset()
+
+                pinch_active = False
 
                 cv2.putText(
                     frame,
