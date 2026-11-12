@@ -18,15 +18,12 @@ screen_width, screen_height = pyautogui.size()
 SMOOTHING_MIN_CUTOFF = 1.0
 SMOOTHING_BETA = 0.025
 
-# Horizontal movement region
 X_MIN = 0.25
 X_MAX = 0.75
 
-# Camera dimensions
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 
-# Match tracking area to monitor aspect ratio
 screen_aspect = screen_width / screen_height
 x_range = X_MAX - X_MIN
 
@@ -35,7 +32,6 @@ y_range = (
     (screen_aspect * CAMERA_HEIGHT)
 )
 
-# Vertical position adjustment
 VERTICAL_OFFSET = 0.16
 
 Y_MIN = 0.5 - y_range / 2 + VERTICAL_OFFSET
@@ -49,7 +45,12 @@ Y_MAX = 0.5 + y_range / 2 + VERTICAL_OFFSET
 PINCH_START_THRESHOLD = 0.25
 PINCH_RELEASE_THRESHOLD = 0.35
 
+# How long a pinch must be detected before clicking
+PINCH_CONFIRMATION_TIME = 0.08
+
+pinch_candidate_start = None
 pinch_active = False
+pinch_cursor_position = None
 
 
 # ----------------------------
@@ -280,13 +281,8 @@ try:
                     0, min(target_y, screen_height - 1)
                 )
 
-                pyautogui.moveTo(
-                    int(target_x),
-                    int(target_y)
-                )
-
                 # ----------------------------
-                # PINCH-TO-CLICK
+                # PINCH DETECTION
                 # ----------------------------
 
                 thumb_tip = hand[4]
@@ -307,29 +303,106 @@ try:
                     pinch_distance / max(palm_size, 0.001)
                 )
 
-                # Trigger one click per pinch
-                if (
-                    not pinch_active
-                    and pinch_ratio < PINCH_START_THRESHOLD
-                ):
+                current_time = time.monotonic()
 
-                    pyautogui.click()
-                    pinch_active = True
+                # ----------------------------
+                # PINCH STATE MACHINE
+                # ----------------------------
 
-                elif (
-                    pinch_active
-                    and pinch_ratio > PINCH_RELEASE_THRESHOLD
-                ):
-
-                    pinch_active = False
-
-                # Gesture feedback
                 if pinch_active:
-                    gesture_text = "PINCH DETECTED"
-                    gesture_colour = (0, 255, 255)
+
+                    # Keep cursor locked until fingers separate
+                    if pinch_ratio > PINCH_RELEASE_THRESHOLD:
+
+                        pinch_active = False
+                        pinch_candidate_start = None
+                        pinch_cursor_position = None
+
+                        # Resume cursor movement
+                        pyautogui.moveTo(
+                            int(target_x),
+                            int(target_y)
+                        )
+
+                        gesture_text = "CURSOR ACTIVE"
+                        gesture_colour = (0, 255, 0)
+
+                    else:
+
+                        gesture_text = "PINCH LOCKED"
+                        gesture_colour = (0, 255, 255)
+
                 else:
-                    gesture_text = "CURSOR ACTIVE"
-                    gesture_colour = (0, 255, 0)
+
+                    if pinch_candidate_start is None:
+
+                        if pinch_ratio < PINCH_START_THRESHOLD:
+
+                            # Capture current cursor position
+                            pinch_cursor_position = pyautogui.position()
+
+                            # Start confirmation timer
+                            pinch_candidate_start = current_time
+
+                            gesture_text = "PINCHING..."
+                            gesture_colour = (0, 165, 255)
+
+                        else:
+
+                            # Normal cursor movement
+                            pyautogui.moveTo(
+                                int(target_x),
+                                int(target_y)
+                            )
+
+                            gesture_text = "CURSOR ACTIVE"
+                            gesture_colour = (0, 255, 0)
+
+                    else:
+
+                        # Cancel if fingers separate again
+                        if pinch_ratio > PINCH_RELEASE_THRESHOLD:
+
+                            pinch_candidate_start = None
+                            pinch_cursor_position = None
+
+                            pyautogui.moveTo(
+                                int(target_x),
+                                int(target_y)
+                            )
+
+                            gesture_text = "CURSOR ACTIVE"
+                            gesture_colour = (0, 255, 0)
+
+                        else:
+
+                            # Wait for pinch confirmation
+                            elapsed = (
+                                current_time - pinch_candidate_start
+                            )
+
+                            if elapsed >= PINCH_CONFIRMATION_TIME:
+
+                                # Click at the captured position
+                                pyautogui.click(
+                                    x=pinch_cursor_position.x,
+                                    y=pinch_cursor_position.y
+                                )
+
+                                pinch_active = True
+                                pinch_candidate_start = None
+
+                                gesture_text = "PINCH LOCKED"
+                                gesture_colour = (0, 255, 255)
+
+                            else:
+
+                                gesture_text = "PINCHING..."
+                                gesture_colour = (0, 165, 255)
+
+                # ----------------------------
+                # VISUAL FEEDBACK
+                # ----------------------------
 
                 cv2.putText(
                     frame,
@@ -341,7 +414,6 @@ try:
                     2
                 )
 
-                # Draw line between thumb and index
                 cv2.line(
                     frame,
                     points[4],
@@ -364,6 +436,8 @@ try:
                 filter_y.reset()
 
                 pinch_active = False
+                pinch_candidate_start = None
+                pinch_cursor_position = None
 
                 cv2.putText(
                     frame,
