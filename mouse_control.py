@@ -16,7 +16,7 @@ pyautogui.PAUSE = 0
 screen_width, screen_height = pyautogui.size()
 
 SMOOTHING_MIN_CUTOFF = 1.0
-SMOOTHING_BETA = 0.025
+SMOOTHING_BETA = 0.06
 
 X_MIN = 0.25
 X_MAX = 0.75
@@ -45,7 +45,6 @@ Y_MAX = 0.5 + y_range / 2 + VERTICAL_OFFSET
 PINCH_START_THRESHOLD = 0.25
 PINCH_RELEASE_THRESHOLD = 0.35
 
-# How long a pinch must be held before dragging starts
 DRAG_HOLD_TIME = 0.35
 
 pinch_tracking = False
@@ -181,11 +180,16 @@ print("Floating Cursor active!")
 print("Press Q to quit.")
 print("Emergency stop: move physical mouse to top-left corner.")
 
+# Performance measurement
+display_fps = 0.0
+
 try:
 
     with HandLandmarker.create_from_options(options) as landmarker:
 
         while True:
+
+            frame_start_time = time.monotonic()
 
             success, frame = camera.read()
 
@@ -318,13 +322,11 @@ try:
 
                     if pinch_ratio < PINCH_START_THRESHOLD:
 
-                        # Start pinch and capture cursor position
                         pinch_tracking = True
                         pinch_start_time = current_time
 
                         pinch_cursor_position = pyautogui.position()
 
-                        # Remember starting fingertip coordinates
                         pinch_start_filtered_x = filtered_x
                         pinch_start_filtered_y = filtered_y
 
@@ -368,7 +370,7 @@ try:
                         if drag_active:
 
                             # Calculate movement relative to
-                            # where the pinch originally started
+                            # original pinch position
                             delta_x = (
                                 (filtered_x - pinch_start_filtered_x)
                                 / (X_MAX - X_MIN)
@@ -414,7 +416,6 @@ try:
                         # Fingers have separated
                         if drag_active:
 
-                            # Release mouse button to drop object
                             pyautogui.mouseUp()
 
                             gesture_text = "DROPPED"
@@ -479,8 +480,7 @@ try:
 
             else:
 
-                # If tracking is lost during a drag,
-                # release the mouse button immediately
+                # Release mouse button if tracking is lost
                 if drag_active:
                     pyautogui.mouseUp()
 
@@ -504,6 +504,28 @@ try:
                     0.7, (0, 0, 255), 2
                 )
 
+            # Show approximate processing FPS
+            frame_duration = max(
+                time.monotonic() - frame_start_time, 0.001
+            )
+
+            instant_fps = 1.0 / frame_duration
+
+            display_fps = (
+                0.9 * display_fps + 0.1 * instant_fps
+                if display_fps else instant_fps
+            )
+
+            cv2.putText(
+                frame,
+                f"FPS: {display_fps:.1f}",
+                (10, height - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2
+            )
+
             cv2.imshow("Floating Cursor", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -511,7 +533,7 @@ try:
 
 finally:
 
-    # Safety: never leave the mouse button held down
+    # Safety: never leave mouse button held down
     pyautogui.mouseUp()
 
     camera.release()
