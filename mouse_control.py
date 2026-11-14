@@ -1,4 +1,3 @@
-
 import cv2
 import mediapipe as mp
 import pyautogui
@@ -58,6 +57,34 @@ pinch_start_filtered_y = None
 
 
 # ----------------------------
+# RIGHT-CLICK CONFIGURATION
+# ----------------------------
+
+# Thumb + middle-finger pinch, with index finger extended.
+RIGHT_PINCH_START_THRESHOLD = 0.25
+RIGHT_PINCH_RELEASE_THRESHOLD = 0.38
+
+right_click_tracking = False
+
+
+# ----------------------------
+# PAUSE / RESUME CONFIGURATION
+# ----------------------------
+
+# Hold an open palm for this long to toggle pause.
+OPEN_PALM_HOLD_TIME = 0.8
+
+# Require the open-palm gesture to disappear for several frames
+# before allowing another pause/resume toggle.
+PAUSE_EXIT_GRACE_FRAMES = 5
+
+paused = False
+pause_gesture_start = None
+pause_gesture_latched = False
+pause_exit_counter = 0
+
+
+# ----------------------------
 # SCROLL CONFIGURATION
 # ----------------------------
 
@@ -76,7 +103,7 @@ SCROLL_DEAD_ZONE = 0.04
 # Maximum scrolling speed in wheel units per second
 SCROLL_MAX_SPEED = 3500.0
 
-# How quickly momentum fades after releasing the gesture
+# No momentum/inertia.
 SCROLL_FRICTION = 0
 
 # Allow brief tracking mistakes without exiting scroll mode
@@ -213,6 +240,28 @@ def finger_extended(hand, tip_index, pip_index):
     )
 
     return tip_distance > pip_distance * 1.12
+
+
+def thumb_extended(hand, palm_size):
+
+    # Thumb tip (4) should be clearly separated from index MCP (5).
+    thumb_spread = math.hypot(
+        hand[4].x - hand[5].x,
+        hand[4].y - hand[5].y
+    )
+
+    return thumb_spread > max(palm_size * 0.45, 0.025)
+
+
+def open_palm_detected(hand, palm_size):
+
+    return (
+        thumb_extended(hand, palm_size)
+        and finger_extended(hand, 8, 6)
+        and finger_extended(hand, 12, 10)
+        and finger_extended(hand, 16, 14)
+        and finger_extended(hand, 20, 18)
+    )
 
 
 # ----------------------------
@@ -408,7 +457,7 @@ try:
                 current_time = time.monotonic()
 
                 # ----------------------------
-                # SCROLL GESTURE DETECTION
+                # GESTURE PRIORITY
                 # ----------------------------
 
                 index_extended = finger_extended(hand, 8, 6)
@@ -416,256 +465,437 @@ try:
                 ring_extended = finger_extended(hand, 16, 14)
                 pinky_extended = finger_extended(hand, 20, 18)
 
-                scroll_gesture = (
-                    index_extended
-                    and middle_extended
-                    and not ring_extended
-                    and not pinky_extended
-                )
+                open_palm = open_palm_detected(hand, palm_size)
 
-                # Add a small grace period for tracking mistakes.
-                if scroll_gesture:
-                    scroll_exit_counter = 0
-                    scroll_mode = True
+                # Open palm takes priority over every mouse action.
+                if open_palm:
 
-                elif scroll_mode:
+                    pause_exit_counter = 0
 
-                    scroll_exit_counter += 1
+                    if pause_gesture_start is None and not pause_gesture_latched:
+                        pause_gesture_start = current_time
 
-                    if scroll_exit_counter > SCROLL_EXIT_GRACE_FRAMES:
-                        scroll_mode = False
-                        scroll_exit_counter = 0
+                    if paused:
+                        gesture_text = "HOLD OPEN PALM TO RESUME"
+                    else:
+                        gesture_text = "HOLD OPEN PALM TO PAUSE"
 
-                # ----------------------------
-                # SCROLL MODE
-                # ----------------------------
+                    gesture_colour = (0, 200, 255)
 
-                if scroll_mode:
+                    if (
+                        not pause_gesture_latched
+                        and pause_gesture_start is not None
+                        and current_time - pause_gesture_start >= OPEN_PALM_HOLD_TIME
+                    ):
 
-                    # Prevent a held drag from remaining active.
+                        paused = not paused
+                        pause_gesture_latched = True
+                        pause_gesture_start = None
+
+                        gesture_text = "PAUSED" if paused else "RESUMED"
+                        gesture_colour = (
+                            (0, 0, 255) if paused else (0, 255, 0)
+                        )
+
+                    # Never leave a drag held while pausing.
                     if drag_active:
                         pyautogui.mouseUp()
 
                     pinch_tracking = False
                     drag_active = False
+                    right_click_tracking = False
 
                     pinch_start_time = None
                     pinch_cursor_position = None
-
                     pinch_start_filtered_x = None
                     pinch_start_filtered_y = None
 
-                    # Average index and middle fingertip positions.
-                    scroll_y = (
-                        hand[8].y + hand[12].y
-                    ) / 2.0
-
-                    # Update scroll velocity from hand position.
-                    if scroll_gesture:
-                        scroll_velocity = calculate_scroll_speed(
-                            scroll_y
-                        )
-
-                    gesture_text = "SCROLL MODE"
-                    gesture_colour = (255, 200, 0)
-
-                    # Draw large centred scroll zone.
-                    cv2.rectangle(
-                        frame,
-                        (
-                            int(SCROLL_X_MIN * width),
-                            int(SCROLL_Y_MIN * height)
-                        ),
-                        (
-                            int(SCROLL_X_MAX * width),
-                            int(SCROLL_Y_MAX * height)
-                        ),
-                        (0, 165, 255),
-                        3
-                    )
-
-                    # Draw centre/dead-zone guides.
-                    centre_y = int(SCROLL_CENTRE * height)
-
-                    cv2.line(
-                        frame,
-                        (int(SCROLL_X_MIN * width), centre_y),
-                        (int(SCROLL_X_MAX * width), centre_y),
-                        (255, 255, 255),
-                        1
-                    )
-
-                    cv2.putText(
-                        frame,
-                        "SCROLL FASTER UP",
-                        (10, 105),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (255, 200, 0),
-                        2
-                    )
-
-                    cv2.putText(
-                        frame,
-                        "SCROLL FASTER DOWN",
-                        (10, height - 45),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 165, 255),
-                        2
-                    )
+                    scroll_mode = False
+                    scroll_exit_counter = 0
+                    scroll_velocity = 0.0
+                    scroll_accumulator = 0.0
 
                 else:
 
-                    # ----------------------------
-                    # NORMAL CURSOR / PINCH / DRAG
-                    # ----------------------------
+                    # A fresh open-palm gesture is required for the next toggle.
+                    if pause_gesture_latched:
 
-                    # Draw normal movement region.
-                    cv2.rectangle(
-                        frame,
-                        (int(X_MIN * width), int(Y_MIN * height)),
-                        (int(X_MAX * width), int(Y_MAX * height)),
-                        (255, 255, 0),
-                        2
-                    )
+                        pause_exit_counter += 1
 
-                    if not pinch_tracking:
+                        if pause_exit_counter >= PAUSE_EXIT_GRACE_FRAMES:
+                            pause_gesture_latched = False
+                            pause_exit_counter = 0
 
-                        if pinch_ratio < PINCH_START_THRESHOLD:
+                    else:
+                        pause_gesture_start = None
+                        pause_exit_counter = 0
 
-                            pinch_tracking = True
-                            pinch_start_time = current_time
+                    if paused:
 
-                            pinch_cursor_position = pyautogui.position()
+                        gesture_text = "PAUSED - OPEN PALM TO RESUME"
+                        gesture_colour = (0, 0, 255)
 
-                            pinch_start_filtered_x = filtered_x
-                            pinch_start_filtered_y = filtered_y
+                        if drag_active:
+                            pyautogui.mouseUp()
 
-                            gesture_text = "PINCHING..."
-                            gesture_colour = (0, 165, 255)
+                        pinch_tracking = False
+                        drag_active = False
+                        right_click_tracking = False
 
-                        else:
-
-                            pyautogui.moveTo(
-                                int(target_x),
-                                int(target_y)
-                            )
-
-                            gesture_text = "CURSOR ACTIVE"
-                            gesture_colour = (0, 255, 0)
+                        scroll_mode = False
+                        scroll_exit_counter = 0
+                        scroll_velocity = 0.0
+                        scroll_accumulator = 0.0
 
                     else:
 
-                        if pinch_ratio <= PINCH_RELEASE_THRESHOLD:
+                        # ----------------------------
+                        # RIGHT-CLICK GESTURE
+                        # ----------------------------
 
-                            elapsed = (
-                                current_time - pinch_start_time
-                            )
+                        right_pinch_distance = math.hypot(
+                            hand[4].x - hand[12].x,
+                            hand[4].y - hand[12].y
+                        )
 
-                            if not drag_active:
+                        right_pinch_ratio = (
+                            right_pinch_distance / max(palm_size, 0.001)
+                        )
 
-                                if elapsed >= DRAG_HOLD_TIME:
+                        right_click_completed = False
 
-                                    pyautogui.moveTo(
-                                        pinch_cursor_position.x,
-                                        pinch_cursor_position.y
-                                    )
+                        if right_click_tracking:
 
-                                    pyautogui.mouseDown()
+                            gesture_text = "RIGHT CLICK..."
+                            gesture_colour = (255, 180, 0)
 
-                                    drag_active = True
+                            # Click once when the thumb and middle finger separate.
+                            if right_pinch_ratio > RIGHT_PINCH_RELEASE_THRESHOLD:
 
-                            if drag_active:
+                                pyautogui.rightClick()
 
-                                delta_x = (
-                                    (filtered_x - pinch_start_filtered_x)
-                                    / (X_MAX - X_MIN)
-                                ) * (screen_width - 1)
+                                right_click_tracking = False
+                                right_click_completed = True
 
-                                delta_y = (
-                                    (filtered_y - pinch_start_filtered_y)
-                                    / (Y_MAX - Y_MIN)
-                                ) * (screen_height - 1)
+                                gesture_text = "RIGHT CLICKED"
+                                gesture_colour = (0, 255, 0)
 
-                                drag_x = (
-                                    pinch_cursor_position.x + delta_x
-                                )
+                        elif (
+                            index_extended
+                            and right_pinch_ratio < RIGHT_PINCH_START_THRESHOLD
+                        ):
 
-                                drag_y = (
-                                    pinch_cursor_position.y + delta_y
-                                )
-
-                                drag_x = max(
-                                    0, min(drag_x, screen_width - 1)
-                                )
-
-                                drag_y = max(
-                                    0, min(drag_y, screen_height - 1)
-                                )
-
-                                pyautogui.moveTo(
-                                    int(drag_x),
-                                    int(drag_y)
-                                )
-
-                                gesture_text = "DRAGGING"
-                                gesture_colour = (255, 0, 255)
-
-                            else:
-
-                                gesture_text = "HOLD TO DRAG"
-                                gesture_colour = (0, 165, 255)
-
-                        else:
+                            right_click_tracking = True
 
                             if drag_active:
-
                                 pyautogui.mouseUp()
 
-                                gesture_text = "DROPPED"
-                                gesture_colour = (0, 255, 0)
-
-                            else:
-
-                                pyautogui.click(
-                                    x=pinch_cursor_position.x,
-                                    y=pinch_cursor_position.y
-                                )
-
-                                gesture_text = "CLICKED"
-                                gesture_colour = (0, 255, 0)
-
-                            # Reset pinch state
                             pinch_tracking = False
                             drag_active = False
 
                             pinch_start_time = None
                             pinch_cursor_position = None
-
                             pinch_start_filtered_x = None
                             pinch_start_filtered_y = None
 
-                            pyautogui.moveTo(
-                                int(target_x),
-                                int(target_y)
+                            gesture_text = "RIGHT CLICK..."
+                            gesture_colour = (255, 180, 0)
+
+                        if right_click_tracking or right_click_completed:
+
+                            # Suppress other controls during and immediately
+                            # after the right-click pinch.
+                            scroll_mode = False
+                            scroll_exit_counter = 0
+                            scroll_velocity = 0.0
+                            scroll_accumulator = 0.0
+
+                        else:
+
+                            # ----------------------------
+                            # SCROLL GESTURE DETECTION
+                            # ----------------------------
+
+                            scroll_gesture = (
+                                index_extended
+                                and middle_extended
+                                and not ring_extended
+                                and not pinky_extended
                             )
 
-                # ----------------------------
-                # MOMENTUM SCROLLING
-                # ----------------------------
+                            if scroll_gesture:
 
-                if scroll_gesture and scroll_mode:
-                    scroll_velocity = calculate_scroll_speed(scroll_y)
-                    scroll_accumulator += scroll_velocity * dt
+                                scroll_exit_counter = 0
+                                scroll_mode = True
 
-                    scroll_steps = int(scroll_accumulator)
-                    if scroll_steps != 0:
-                        pyautogui.scroll(scroll_steps)
-                        scroll_accumulator -= scroll_steps
-                else:
-                    scroll_velocity = 0.0
-                    scroll_accumulator = 0.0
+                            elif scroll_mode:
+
+                                scroll_exit_counter += 1
+
+                                if scroll_exit_counter > SCROLL_EXIT_GRACE_FRAMES:
+                                    scroll_mode = False
+                                    scroll_exit_counter = 0
+
+                            # ----------------------------
+                            # SCROLL MODE
+                            # ----------------------------
+
+                            if scroll_mode:
+
+                                if drag_active:
+                                    pyautogui.mouseUp()
+
+                                pinch_tracking = False
+                                drag_active = False
+
+                                pinch_start_time = None
+                                pinch_cursor_position = None
+
+                                pinch_start_filtered_x = None
+                                pinch_start_filtered_y = None
+
+                                # Average index and middle fingertip positions.
+                                scroll_y = (
+                                    hand[8].y + hand[12].y
+                                ) / 2.0
+
+                                # Update scroll velocity from hand position.
+                                if scroll_gesture:
+                                    scroll_velocity = calculate_scroll_speed(
+                                        scroll_y
+                                    )
+
+                                gesture_text = "SCROLL MODE"
+                                gesture_colour = (255, 200, 0)
+
+                                # Draw large centred scroll zone.
+                                cv2.rectangle(
+                                    frame,
+                                    (
+                                        int(SCROLL_X_MIN * width),
+                                        int(SCROLL_Y_MIN * height)
+                                    ),
+                                    (
+                                        int(SCROLL_X_MAX * width),
+                                        int(SCROLL_Y_MAX * height)
+                                    ),
+                                    (0, 165, 255),
+                                    3
+                                )
+
+                                # Draw centre/dead-zone guide.
+                                centre_y = int(SCROLL_CENTRE * height)
+
+                                cv2.line(
+                                    frame,
+                                    (
+                                        int(SCROLL_X_MIN * width),
+                                        centre_y
+                                    ),
+                                    (
+                                        int(SCROLL_X_MAX * width),
+                                        centre_y
+                                    ),
+                                    (255, 255, 255),
+                                    1
+                                )
+
+                                cv2.putText(
+                                    frame,
+                                    "SCROLL FASTER UP",
+                                    (10, 105),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55,
+                                    (255, 200, 0),
+                                    2
+                                )
+
+                                cv2.putText(
+                                    frame,
+                                    "SCROLL FASTER DOWN",
+                                    (10, height - 45),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55,
+                                    (0, 165, 255),
+                                    2
+                                )
+
+                            else:
+
+                                # ----------------------------
+                                # NORMAL CURSOR / PINCH / DRAG
+                                # ----------------------------
+
+                                # Draw normal movement region.
+                                cv2.rectangle(
+                                    frame,
+                                    (int(X_MIN * width), int(Y_MIN * height)),
+                                    (int(X_MAX * width), int(Y_MAX * height)),
+                                    (255, 255, 0),
+                                    2
+                                )
+
+                                if not pinch_tracking:
+
+                                    if pinch_ratio < PINCH_START_THRESHOLD:
+
+                                        pinch_tracking = True
+                                        pinch_start_time = current_time
+
+                                        pinch_cursor_position = pyautogui.position()
+
+                                        pinch_start_filtered_x = filtered_x
+                                        pinch_start_filtered_y = filtered_y
+
+                                        gesture_text = "PINCHING..."
+                                        gesture_colour = (0, 165, 255)
+
+                                    else:
+
+                                        pyautogui.moveTo(
+                                            int(target_x),
+                                            int(target_y)
+                                        )
+
+                                        gesture_text = "CURSOR ACTIVE"
+                                        gesture_colour = (0, 255, 0)
+
+                                else:
+
+                                    if pinch_ratio <= PINCH_RELEASE_THRESHOLD:
+
+                                        elapsed = (
+                                            current_time - pinch_start_time
+                                        )
+
+                                        if not drag_active:
+
+                                            if elapsed >= DRAG_HOLD_TIME:
+
+                                                pyautogui.moveTo(
+                                                    pinch_cursor_position.x,
+                                                    pinch_cursor_position.y
+                                                )
+
+                                                pyautogui.mouseDown()
+
+                                                drag_active = True
+
+                                        if drag_active:
+
+                                            delta_x = (
+                                                (filtered_x - pinch_start_filtered_x)
+                                                / (X_MAX - X_MIN)
+                                            ) * (screen_width - 1)
+
+                                            delta_y = (
+                                                (filtered_y - pinch_start_filtered_y)
+                                                / (Y_MAX - Y_MIN)
+                                            ) * (screen_height - 1)
+
+                                            drag_x = (
+                                                pinch_cursor_position.x + delta_x
+                                            )
+
+                                            drag_y = (
+                                                pinch_cursor_position.y + delta_y
+                                            )
+
+                                            drag_x = max(
+                                                0,
+                                                min(drag_x, screen_width - 1)
+                                            )
+
+                                            drag_y = max(
+                                                0,
+                                                min(drag_y, screen_height - 1)
+                                            )
+
+                                            pyautogui.moveTo(
+                                                int(drag_x),
+                                                int(drag_y)
+                                            )
+
+                                            gesture_text = "DRAGGING"
+                                            gesture_colour = (255, 0, 255)
+
+                                        else:
+
+                                            gesture_text = "HOLD TO DRAG"
+                                            gesture_colour = (0, 165, 255)
+
+                                    else:
+
+                                        if drag_active:
+
+                                            pyautogui.mouseUp()
+
+                                            gesture_text = "DROPPED"
+                                            gesture_colour = (0, 255, 0)
+
+                                        else:
+
+                                            pyautogui.click(
+                                                x=pinch_cursor_position.x,
+                                                y=pinch_cursor_position.y
+                                            )
+
+                                            gesture_text = "CLICKED"
+                                            gesture_colour = (0, 255, 0)
+
+                                        # Reset pinch state.
+                                        pinch_tracking = False
+                                        drag_active = False
+
+                                        pinch_start_time = None
+                                        pinch_cursor_position = None
+
+                                        pinch_start_filtered_x = None
+                                        pinch_start_filtered_y = None
+
+                                        pyautogui.moveTo(
+                                            int(target_x),
+                                            int(target_y)
+                                        )
+
+                            # ----------------------------
+                            # SCROLL OUTPUT
+                            # ----------------------------
+
+                            # Scroll only while the two-finger gesture is detected.
+                            if scroll_gesture and scroll_mode:
+
+                                scroll_velocity = calculate_scroll_speed(
+                                    scroll_y
+                                )
+
+                                scroll_accumulator += scroll_velocity * dt
+
+                                scroll_steps = int(scroll_accumulator)
+
+                                if scroll_steps != 0:
+
+                                    pyautogui.scroll(scroll_steps)
+
+                                    scroll_accumulator -= scroll_steps
+
+                            else:
+
+                                scroll_velocity = 0.0
+                                scroll_accumulator = 0.0
+
+                # Keep the paused state visible even after the toggle frame.
+                if paused:
+
+                    cv2.putText(
+                        frame,
+                        "PAUSED",
+                        (width - 130, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 0, 255),
+                        2
+                    )
 
                 # ----------------------------
                 # VISUAL FEEDBACK
@@ -727,10 +957,19 @@ try:
                 pinch_start_filtered_x = None
                 pinch_start_filtered_y = None
 
+                right_click_tracking = False
+
+                pause_gesture_start = None
+                pause_gesture_latched = False
+                pause_exit_counter = 0
+
                 scroll_mode = False
                 scroll_exit_counter = 0
 
-                # Keep momentum briefly after losing the hand.
+                scroll_velocity = 0.0
+                scroll_accumulator = 0.0
+
+                # Keep the pause state until an open palm is shown again.
                 cv2.putText(
                     frame,
                     "NO HAND DETECTED",
@@ -740,6 +979,17 @@ try:
                     (0, 0, 255),
                     2
                 )
+
+                if paused:
+                    cv2.putText(
+                        frame,
+                        "PAUSED",
+                        (width - 130, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (0, 0, 255),
+                        2
+                    )
 
             # ----------------------------
             # FPS COUNTER
