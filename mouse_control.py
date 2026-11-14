@@ -60,11 +60,14 @@ pinch_start_filtered_y = None
 # RIGHT-CLICK CONFIGURATION
 # ----------------------------
 
-# Thumb + middle-finger pinch, with index finger extended.
-RIGHT_PINCH_START_THRESHOLD = 0.25
-RIGHT_PINCH_RELEASE_THRESHOLD = 0.38
+# Middle finger raised, with the other three fingers folded and thumb extended.
+# Hold the pose briefly to avoid accidental right-clicks.
+RIGHT_CLICK_HOLD_TIME = 0.4
+RIGHT_CLICK_EXIT_GRACE_FRAMES = 4
 
-right_click_tracking = False
+right_click_start_time = None
+right_click_latched = False
+right_click_exit_counter = 0
 
 
 # ----------------------------
@@ -503,7 +506,9 @@ try:
 
                     pinch_tracking = False
                     drag_active = False
-                    right_click_tracking = False
+                    right_click_start_time = None
+                    right_click_latched = False
+                    right_click_exit_counter = 0
 
                     pinch_start_time = None
                     pinch_cursor_position = None
@@ -540,7 +545,9 @@ try:
 
                         pinch_tracking = False
                         drag_active = False
-                        right_click_tracking = False
+                        right_click_start_time = None
+                        right_click_latched = False
+                        right_click_exit_counter = 0
 
                         scroll_mode = False
                         scroll_exit_counter = 0
@@ -553,58 +560,67 @@ try:
                         # RIGHT-CLICK GESTURE
                         # ----------------------------
 
-                        right_pinch_distance = math.hypot(
-                            hand[4].x - hand[12].x,
-                            hand[4].y - hand[12].y
+                        # One raised middle finger; index, ring and pinky folded;
+                        # thumb extended. Show the back of the hand to the camera.
+                        right_click_gesture = (
+                            middle_extended
+                            and not index_extended
+                            and not ring_extended
+                            and not pinky_extended
+                            and thumb_extended(hand, palm_size)
                         )
 
-                        right_pinch_ratio = (
-                            right_pinch_distance / max(palm_size, 0.001)
-                        )
-
+                        right_click_active = False
                         right_click_completed = False
 
-                        if right_click_tracking:
+                        if right_click_gesture:
+                            right_click_exit_counter = 0
 
-                            gesture_text = "RIGHT CLICK..."
-                            gesture_colour = (255, 180, 0)
+                            if right_click_start_time is None and not right_click_latched:
+                                right_click_start_time = current_time
 
-                            # Click once when the thumb and middle finger separate.
-                            if right_pinch_ratio > RIGHT_PINCH_RELEASE_THRESHOLD:
-
-                                pyautogui.rightClick()
-
-                                right_click_tracking = False
-                                right_click_completed = True
-
-                                gesture_text = "RIGHT CLICKED"
+                            if right_click_latched:
+                                right_click_active = True
+                                gesture_text = "RIGHT CLICKED - RELEASE GESTURE"
                                 gesture_colour = (0, 255, 0)
 
-                        elif (
-                            index_extended
-                            and right_pinch_ratio < RIGHT_PINCH_START_THRESHOLD
-                        ):
+                            elif right_click_start_time is not None:
+                                right_click_active = True
+                                gesture_text = "HOLD FOR RIGHT CLICK"
+                                gesture_colour = (255, 180, 0)
 
-                            right_click_tracking = True
+                                if current_time - right_click_start_time >= RIGHT_CLICK_HOLD_TIME:
+                                    pyautogui.rightClick()
+                                    right_click_latched = True
+                                    right_click_start_time = None
+                                    right_click_completed = True
+                                    gesture_text = "RIGHT CLICKED"
+                                    gesture_colour = (0, 255, 0)
 
+                        elif right_click_latched or right_click_start_time is not None:
+                            right_click_exit_counter += 1
+                            right_click_active = True
+
+                            if right_click_exit_counter > RIGHT_CLICK_EXIT_GRACE_FRAMES:
+                                right_click_latched = False
+                                right_click_start_time = None
+                                right_click_exit_counter = 0
+                                right_click_active = False
+
+                        if right_click_active or right_click_completed:
+
+                            # Cancel any in-progress left-click/drag and suppress
+                            # scrolling until the right-click pose is released.
                             if drag_active:
                                 pyautogui.mouseUp()
 
                             pinch_tracking = False
                             drag_active = False
-
                             pinch_start_time = None
                             pinch_cursor_position = None
                             pinch_start_filtered_x = None
                             pinch_start_filtered_y = None
 
-                            gesture_text = "RIGHT CLICK..."
-                            gesture_colour = (255, 180, 0)
-
-                        if right_click_tracking or right_click_completed:
-
-                            # Suppress other controls during and immediately
-                            # after the right-click pinch.
                             scroll_mode = False
                             scroll_exit_counter = 0
                             scroll_velocity = 0.0
@@ -957,7 +973,9 @@ try:
                 pinch_start_filtered_x = None
                 pinch_start_filtered_y = None
 
-                right_click_tracking = False
+                right_click_start_time = None
+                right_click_latched = False
+                right_click_exit_counter = 0
 
                 pause_gesture_start = None
                 pause_gesture_latched = False
