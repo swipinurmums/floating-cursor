@@ -58,6 +58,38 @@ pinch_start_filtered_y = None
 
 
 # ----------------------------
+# SCROLL CONFIGURATION
+# ----------------------------
+
+# Large, centred scroll area
+SCROLL_X_MIN = 0.05
+SCROLL_X_MAX = 0.95
+SCROLL_Y_MIN = 0.08
+SCROLL_Y_MAX = 0.92
+
+# Centre of the scroll zone
+SCROLL_CENTRE = 0.50
+
+# Distance from centre before scrolling starts
+SCROLL_DEAD_ZONE = 0.04
+
+# Maximum scrolling speed in wheel units per second
+SCROLL_MAX_SPEED = 3500.0
+
+# How quickly momentum fades after releasing the gesture
+SCROLL_FRICTION = 0
+
+# Allow brief tracking mistakes without exiting scroll mode
+SCROLL_EXIT_GRACE_FRAMES = 3
+
+scroll_mode = False
+scroll_exit_counter = 0
+
+scroll_velocity = 0.0
+scroll_accumulator = 0.0
+
+
+# ----------------------------
 # ONE EURO FILTER
 # ----------------------------
 
@@ -163,6 +195,70 @@ options = HandLandmarkerOptions(
 
 
 # ----------------------------
+# FINGER EXTENSION DETECTION
+# ----------------------------
+
+def finger_extended(hand, tip_index, pip_index):
+
+    wrist = hand[0]
+
+    tip_distance = math.hypot(
+        hand[tip_index].x - wrist.x,
+        hand[tip_index].y - wrist.y
+    )
+
+    pip_distance = math.hypot(
+        hand[pip_index].x - wrist.x,
+        hand[pip_index].y - wrist.y
+    )
+
+    return tip_distance > pip_distance * 1.12
+
+
+# ----------------------------
+# SCROLL SPEED CALCULATION
+# ----------------------------
+
+def calculate_scroll_speed(hand_y):
+
+    # Clamp position to the scroll zone
+    hand_y = max(
+        SCROLL_Y_MIN,
+        min(hand_y, SCROLL_Y_MAX)
+    )
+
+    # Positive velocity means scroll upwards.
+    displacement = SCROLL_CENTRE - hand_y
+
+    # Ignore small movements around the centre.
+    if abs(displacement) <= SCROLL_DEAD_ZONE:
+        return 0.0
+
+    # Remove the dead-zone distance.
+    if displacement > 0:
+        effective_distance = displacement - SCROLL_DEAD_ZONE
+    else:
+        effective_distance = displacement + SCROLL_DEAD_ZONE
+
+    available_range = (
+        (SCROLL_Y_MAX - SCROLL_Y_MIN) / 2
+        - SCROLL_DEAD_ZONE
+    )
+
+    intensity = min(
+        abs(effective_distance) / available_range,
+        1.0
+    )
+
+    # Non-linear acceleration gives finer control near the centre.
+    intensity = intensity ** 1.5
+
+    speed = intensity * SCROLL_MAX_SPEED
+
+    return math.copysign(speed, displacement)
+
+
+# ----------------------------
 # CAMERA
 # ----------------------------
 
@@ -180,8 +276,13 @@ print("Floating Cursor active!")
 print("Press Q to quit.")
 print("Emergency stop: move physical mouse to top-left corner.")
 
-# Performance measurement
 display_fps = 0.0
+previous_frame_time = time.monotonic()
+
+
+# ----------------------------
+# MAIN PROGRAM
+# ----------------------------
 
 try:
 
@@ -190,6 +291,13 @@ try:
         while True:
 
             frame_start_time = time.monotonic()
+
+            dt = min(
+                frame_start_time - previous_frame_time,
+                0.1
+            )
+
+            previous_frame_time = frame_start_time
 
             success, frame = camera.read()
 
@@ -215,14 +323,6 @@ try:
                 mp_image, timestamp_ms
             )
 
-            # Draw movement region
-            cv2.rectangle(
-                frame,
-                (int(X_MIN * width), int(Y_MIN * height)),
-                (int(X_MAX * width), int(Y_MAX * height)),
-                (255, 255, 0), 2
-            )
-
             if results.hand_landmarks:
 
                 hand = results.hand_landmarks[0]
@@ -244,7 +344,7 @@ try:
                         2
                     )
 
-                # Draw landmark points
+                # Draw landmarks
                 for point in points:
                     cv2.circle(
                         frame, point, 5,
@@ -262,14 +362,12 @@ try:
                 # Filter fingertip coordinates
                 timestamp = time.monotonic()
 
-                landmark = hand[8]
-
                 filtered_x = filter_x.filter(
-                    landmark.x, timestamp
+                    hand[8].x, timestamp
                 )
 
                 filtered_y = filter_y.filter(
-                    landmark.y, timestamp
+                    hand[8].y, timestamp
                 )
 
                 # Map active camera area to screen
@@ -281,7 +379,6 @@ try:
                     (filtered_y - Y_MIN) / (Y_MAX - Y_MIN)
                 ) * (screen_height - 1)
 
-                # Keep cursor inside screen
                 target_x = max(
                     0, min(target_x, screen_width - 1)
                 )
@@ -294,15 +391,11 @@ try:
                 # PINCH DETECTION
                 # ----------------------------
 
-                thumb_tip = hand[4]
-                index_finger_tip = hand[8]
-
                 pinch_distance = math.hypot(
-                    thumb_tip.x - index_finger_tip.x,
-                    thumb_tip.y - index_finger_tip.y
+                    hand[4].x - hand[8].x,
+                    hand[4].y - hand[8].y
                 )
 
-                # Normalise against palm size
                 palm_size = math.hypot(
                     hand[0].x - hand[9].x,
                     hand[0].y - hand[9].y
@@ -315,138 +408,264 @@ try:
                 current_time = time.monotonic()
 
                 # ----------------------------
-                # PINCH AND DRAG STATE MACHINE
+                # SCROLL GESTURE DETECTION
                 # ----------------------------
 
-                if not pinch_tracking:
+                index_extended = finger_extended(hand, 8, 6)
+                middle_extended = finger_extended(hand, 12, 10)
+                ring_extended = finger_extended(hand, 16, 14)
+                pinky_extended = finger_extended(hand, 20, 18)
 
-                    if pinch_ratio < PINCH_START_THRESHOLD:
+                scroll_gesture = (
+                    index_extended
+                    and middle_extended
+                    and not ring_extended
+                    and not pinky_extended
+                )
 
-                        pinch_tracking = True
-                        pinch_start_time = current_time
+                # Add a small grace period for tracking mistakes.
+                if scroll_gesture:
+                    scroll_exit_counter = 0
+                    scroll_mode = True
 
-                        pinch_cursor_position = pyautogui.position()
+                elif scroll_mode:
 
-                        pinch_start_filtered_x = filtered_x
-                        pinch_start_filtered_y = filtered_y
+                    scroll_exit_counter += 1
 
-                        gesture_text = "PINCHING..."
-                        gesture_colour = (0, 165, 255)
+                    if scroll_exit_counter > SCROLL_EXIT_GRACE_FRAMES:
+                        scroll_mode = False
+                        scroll_exit_counter = 0
 
-                    else:
+                # ----------------------------
+                # SCROLL MODE
+                # ----------------------------
 
-                        # Normal cursor movement
-                        pyautogui.moveTo(
-                            int(target_x),
-                            int(target_y)
+                if scroll_mode:
+
+                    # Prevent a held drag from remaining active.
+                    if drag_active:
+                        pyautogui.mouseUp()
+
+                    pinch_tracking = False
+                    drag_active = False
+
+                    pinch_start_time = None
+                    pinch_cursor_position = None
+
+                    pinch_start_filtered_x = None
+                    pinch_start_filtered_y = None
+
+                    # Average index and middle fingertip positions.
+                    scroll_y = (
+                        hand[8].y + hand[12].y
+                    ) / 2.0
+
+                    # Update scroll velocity from hand position.
+                    if scroll_gesture:
+                        scroll_velocity = calculate_scroll_speed(
+                            scroll_y
                         )
 
-                        gesture_text = "CURSOR ACTIVE"
-                        gesture_colour = (0, 255, 0)
+                    gesture_text = "SCROLL MODE"
+                    gesture_colour = (255, 200, 0)
+
+                    # Draw large centred scroll zone.
+                    cv2.rectangle(
+                        frame,
+                        (
+                            int(SCROLL_X_MIN * width),
+                            int(SCROLL_Y_MIN * height)
+                        ),
+                        (
+                            int(SCROLL_X_MAX * width),
+                            int(SCROLL_Y_MAX * height)
+                        ),
+                        (0, 165, 255),
+                        3
+                    )
+
+                    # Draw centre/dead-zone guides.
+                    centre_y = int(SCROLL_CENTRE * height)
+
+                    cv2.line(
+                        frame,
+                        (int(SCROLL_X_MIN * width), centre_y),
+                        (int(SCROLL_X_MAX * width), centre_y),
+                        (255, 255, 255),
+                        1
+                    )
+
+                    cv2.putText(
+                        frame,
+                        "SCROLL FASTER UP",
+                        (10, 105),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (255, 200, 0),
+                        2
+                    )
+
+                    cv2.putText(
+                        frame,
+                        "SCROLL FASTER DOWN",
+                        (10, height - 45),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 165, 255),
+                        2
+                    )
 
                 else:
 
-                    # Fingers are still pinched
-                    if pinch_ratio <= PINCH_RELEASE_THRESHOLD:
+                    # ----------------------------
+                    # NORMAL CURSOR / PINCH / DRAG
+                    # ----------------------------
 
-                        elapsed = (
-                            current_time - pinch_start_time
-                        )
+                    # Draw normal movement region.
+                    cv2.rectangle(
+                        frame,
+                        (int(X_MIN * width), int(Y_MIN * height)),
+                        (int(X_MAX * width), int(Y_MAX * height)),
+                        (255, 255, 0),
+                        2
+                    )
 
-                        if not drag_active:
+                    if not pinch_tracking:
 
-                            if elapsed >= DRAG_HOLD_TIME:
+                        if pinch_ratio < PINCH_START_THRESHOLD:
 
-                                # Begin dragging at captured position
-                                pyautogui.moveTo(
-                                    pinch_cursor_position.x,
-                                    pinch_cursor_position.y
-                                )
+                            pinch_tracking = True
+                            pinch_start_time = current_time
 
-                                pyautogui.mouseDown()
+                            pinch_cursor_position = pyautogui.position()
 
-                                drag_active = True
+                            pinch_start_filtered_x = filtered_x
+                            pinch_start_filtered_y = filtered_y
 
-                        if drag_active:
-
-                            # Calculate movement relative to
-                            # original pinch position
-                            delta_x = (
-                                (filtered_x - pinch_start_filtered_x)
-                                / (X_MAX - X_MIN)
-                            ) * (screen_width - 1)
-
-                            delta_y = (
-                                (filtered_y - pinch_start_filtered_y)
-                                / (Y_MAX - Y_MIN)
-                            ) * (screen_height - 1)
-
-                            drag_x = (
-                                pinch_cursor_position.x + delta_x
-                            )
-
-                            drag_y = (
-                                pinch_cursor_position.y + delta_y
-                            )
-
-                            # Keep drag inside screen
-                            drag_x = max(
-                                0, min(drag_x, screen_width - 1)
-                            )
-
-                            drag_y = max(
-                                0, min(drag_y, screen_height - 1)
-                            )
-
-                            pyautogui.moveTo(
-                                int(drag_x),
-                                int(drag_y)
-                            )
-
-                            gesture_text = "DRAGGING"
-                            gesture_colour = (255, 0, 255)
+                            gesture_text = "PINCHING..."
+                            gesture_colour = (0, 165, 255)
 
                         else:
 
-                            gesture_text = "HOLD TO DRAG"
-                            gesture_colour = (0, 165, 255)
+                            pyautogui.moveTo(
+                                int(target_x),
+                                int(target_y)
+                            )
+
+                            gesture_text = "CURSOR ACTIVE"
+                            gesture_colour = (0, 255, 0)
 
                     else:
 
-                        # Fingers have separated
-                        if drag_active:
+                        if pinch_ratio <= PINCH_RELEASE_THRESHOLD:
 
-                            pyautogui.mouseUp()
+                            elapsed = (
+                                current_time - pinch_start_time
+                            )
 
-                            gesture_text = "DROPPED"
-                            gesture_colour = (0, 255, 0)
+                            if not drag_active:
+
+                                if elapsed >= DRAG_HOLD_TIME:
+
+                                    pyautogui.moveTo(
+                                        pinch_cursor_position.x,
+                                        pinch_cursor_position.y
+                                    )
+
+                                    pyautogui.mouseDown()
+
+                                    drag_active = True
+
+                            if drag_active:
+
+                                delta_x = (
+                                    (filtered_x - pinch_start_filtered_x)
+                                    / (X_MAX - X_MIN)
+                                ) * (screen_width - 1)
+
+                                delta_y = (
+                                    (filtered_y - pinch_start_filtered_y)
+                                    / (Y_MAX - Y_MIN)
+                                ) * (screen_height - 1)
+
+                                drag_x = (
+                                    pinch_cursor_position.x + delta_x
+                                )
+
+                                drag_y = (
+                                    pinch_cursor_position.y + delta_y
+                                )
+
+                                drag_x = max(
+                                    0, min(drag_x, screen_width - 1)
+                                )
+
+                                drag_y = max(
+                                    0, min(drag_y, screen_height - 1)
+                                )
+
+                                pyautogui.moveTo(
+                                    int(drag_x),
+                                    int(drag_y)
+                                )
+
+                                gesture_text = "DRAGGING"
+                                gesture_colour = (255, 0, 255)
+
+                            else:
+
+                                gesture_text = "HOLD TO DRAG"
+                                gesture_colour = (0, 165, 255)
 
                         else:
 
-                            # Short pinch = normal left-click
-                            pyautogui.click(
-                                x=pinch_cursor_position.x,
-                                y=pinch_cursor_position.y
+                            if drag_active:
+
+                                pyautogui.mouseUp()
+
+                                gesture_text = "DROPPED"
+                                gesture_colour = (0, 255, 0)
+
+                            else:
+
+                                pyautogui.click(
+                                    x=pinch_cursor_position.x,
+                                    y=pinch_cursor_position.y
+                                )
+
+                                gesture_text = "CLICKED"
+                                gesture_colour = (0, 255, 0)
+
+                            # Reset pinch state
+                            pinch_tracking = False
+                            drag_active = False
+
+                            pinch_start_time = None
+                            pinch_cursor_position = None
+
+                            pinch_start_filtered_x = None
+                            pinch_start_filtered_y = None
+
+                            pyautogui.moveTo(
+                                int(target_x),
+                                int(target_y)
                             )
 
-                            gesture_text = "CLICKED"
-                            gesture_colour = (0, 255, 0)
+                # ----------------------------
+                # MOMENTUM SCROLLING
+                # ----------------------------
 
-                        # Reset gesture state
-                        pinch_tracking = False
-                        drag_active = False
+                if scroll_gesture and scroll_mode:
+                    scroll_velocity = calculate_scroll_speed(scroll_y)
+                    scroll_accumulator += scroll_velocity * dt
 
-                        pinch_start_time = None
-                        pinch_cursor_position = None
-
-                        pinch_start_filtered_x = None
-                        pinch_start_filtered_y = None
-
-                        # Resume normal cursor movement
-                        pyautogui.moveTo(
-                            int(target_x),
-                            int(target_y)
-                        )
+                    scroll_steps = int(scroll_accumulator)
+                    if scroll_steps != 0:
+                        pyautogui.scroll(scroll_steps)
+                        scroll_accumulator -= scroll_steps
+                else:
+                    scroll_velocity = 0.0
+                    scroll_accumulator = 0.0
 
                 # ----------------------------
                 # VISUAL FEEDBACK
@@ -475,12 +694,24 @@ try:
                     f"Index: {index_tip}",
                     (10, 35),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (255, 255, 255), 2
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Scroll speed: {abs(scroll_velocity):.1f}",
+                    (10, 135),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    1
                 )
 
             else:
 
-                # Release mouse button if tracking is lost
+                # Release any held mouse button.
                 if drag_active:
                     pyautogui.mouseUp()
 
@@ -496,17 +727,27 @@ try:
                 pinch_start_filtered_x = None
                 pinch_start_filtered_y = None
 
+                scroll_mode = False
+                scroll_exit_counter = 0
+
+                # Keep momentum briefly after losing the hand.
                 cv2.putText(
                     frame,
                     "NO HAND DETECTED",
                     (10, 35),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 0, 255), 2
+                    0.7,
+                    (0, 0, 255),
+                    2
                 )
 
-            # Show approximate processing FPS
+            # ----------------------------
+            # FPS COUNTER
+            # ----------------------------
+
             frame_duration = max(
-                time.monotonic() - frame_start_time, 0.001
+                time.monotonic() - frame_start_time,
+                0.001
             )
 
             instant_fps = 1.0 / frame_duration
@@ -533,7 +774,7 @@ try:
 
 finally:
 
-    # Safety: never leave mouse button held down
+    # Safety: never leave the mouse button held down.
     pyautogui.mouseUp()
 
     camera.release()
